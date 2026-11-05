@@ -15,22 +15,85 @@ pip install -r requirements.txt
 ./scripts/link_datasets.sh
 ```
 
-## Train
+## Train and monitor (GTZAN only)
 
-Spectrogram model (default):
+After this change is merged, update your existing Mac checkout with `git pull --ff-only`
+(on `main`). To try the PR before merging instead:
 
 ```bash
+cd /Users/ianfedele/Projects/team8-spec-vs-wave
+git status --short  # commit/stash any local edits before switching branches
+git fetch origin
+git switch --track origin/feat/tensorboard-monitoring
 source .venv/bin/activate
-python src/train.py --representation spectrogram --epochs 15
+python -m pip install -r requirements.txt
 ```
 
-Waveform model:
+Run these from the Mac checkout, in its activated `.venv`. Use a **new output
+folder** to preserve previous baseline checkpoints/JSON; choose another name for
+future experiments. Run sequentially for a fair comparison on the same hardware.
+Both commands use the same seed and file split:
 
 ```bash
-python src/train.py --representation waveform --epochs 15
+python src/train.py --representation spectrogram --epochs 15 --seed 42 --out-dir checkpoints/tensorboard-comparison-01 --log-dir runs
+python src/train.py --representation waveform --epochs 15 --seed 42 --out-dir checkpoints/tensorboard-comparison-01 --log-dir runs
 ```
 
-Checkpoints and metrics land in `checkpoints/`.
+Terminal progress bars remain. Each invocation creates a unique representation +
+UTC timestamp + random suffix directory under `runs/`. Epoch-level graphs update
+after every completed epoch: `loss/train`, `loss/validation`, `accuracy/train`,
+`accuracy/validation` (accuracy is a fraction from 0 to 1). Select both runs in
+TensorBoard's Scalars view to compare them. Settings and split sizes appear under
+Text. Training accuracy is measured during training, with training-mode layers;
+validation accuracy is measured in evaluation mode after the epoch.
+
+The best validation checkpoint is still saved as `best_<representation>.pt` and
+metrics as `metrics_<representation>.json` under `--out-dir`. JSON history now
+also includes training accuracy. Reusing an output folder overwrites these files
+but never reuses an event directory. Final `loss/test` and `accuracy/test` are
+recorded **once**, after reloading the best validation checkpoint, at that
+checkpoint's epoch; they are not a test learning curve. Ctrl-C flushes/closes the
+event writer; incomplete epochs have no epoch metrics, and interrupted runs do
+not claim final test results. Old baseline runs cannot be graphed retroactively.
+
+### Open TensorBoard remotely
+
+In a second terminal **on the Mac** (or a second Cursor Remote SSH terminal):
+
+```bash
+cd /Users/ianfedele/Projects/team8-spec-vs-wave
+source .venv/bin/activate
+python -m tensorboard.main --logdir runs --host 127.0.0.1 --port 6006
+```
+
+In the laptop's Cursor window already connected to the Mac via Remote SSH, open
+the **Ports** panel and forward remote port **6006**, keeping it private/local.
+Open `http://localhost:6006` on the laptop (or the local port Cursor assigns).
+Alternatively, run this in a **local Mint laptop terminal**, keeping it open:
+
+```bash
+ssh -N -o ExitOnForwardFailure=yes -L 127.0.0.1:6006:127.0.0.1:6006 ianfedele@100.75.160.71
+```
+
+Then browse to `http://localhost:6006`. Choose either Cursor forwarding or the
+SSH tunnel, not both on the same local port. If local 6006 is occupied, use
+`-L 127.0.0.1:16006:127.0.0.1:6006` and browse to `http://localhost:16006`.
+No public server, TensorBoard account, or port forwarding on your router is needed.
+Training can stay in a `tmux` session on the Mac if you disconnect.
+Event files (including custom `--log-dir` locations) are ignored by Git.
+
+### Interpretation and tests
+
+This script trains **GTZAN only**; FMA-small is downloaded/linked for future work,
+not supported by this training command. The seeded stratified 70/15/15 split is
+file-level, **not artist-disjoint**. Treat it as a baseline, not paper-quality
+leakage-controlled results. Unreadable WAVs and AppleDouble files are skipped.
+
+CPU smoke/regression tests use generated short audio fixtures, not full training:
+
+```bash
+python -m unittest discover -s tests -v
+```
 
 ## Data
 
@@ -55,5 +118,4 @@ checkpoints/     best_*.pt + metrics_*.json
 ## Next steps
 
 - Add FMA-small loader using `tracks.csv` (`subset == small`)
-- Log side-by-side spectrogram vs waveform accuracy
 - Optional: confusion-matrix plots, longer clips, SpecAugment
