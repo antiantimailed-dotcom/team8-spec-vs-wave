@@ -22,12 +22,13 @@ class SpecCNN(nn.Module):
             nn.Conv2d(64, 128, 3, padding=1),
             nn.BatchNorm2d(128),
             nn.ReLU(inplace=True),
-            nn.AdaptiveAvgPool2d((4, 4)),
+            # (1,1) avoids MPS AdaptiveAvgPool2d divisibility limits
+            nn.AdaptiveAvgPool2d((1, 1)),
         )
         self.classifier = nn.Sequential(
             nn.Flatten(),
             nn.Dropout(0.3),
-            nn.Linear(128 * 4 * 4, 256),
+            nn.Linear(128, 256),
             nn.ReLU(inplace=True),
             nn.Dropout(0.3),
             nn.Linear(256, num_classes),
@@ -54,12 +55,12 @@ class WaveCNN(nn.Module):
             nn.Conv1d(64, 128, kernel_size=16, stride=2, padding=7),
             nn.BatchNorm1d(128),
             nn.ReLU(inplace=True),
-            nn.AdaptiveAvgPool1d(32),
+            nn.AdaptiveAvgPool1d(1),
         )
         self.classifier = nn.Sequential(
             nn.Flatten(),
             nn.Dropout(0.3),
-            nn.Linear(128 * 32, 256),
+            nn.Linear(128, 256),
             nn.ReLU(inplace=True),
             nn.Dropout(0.3),
             nn.Linear(256, num_classes),

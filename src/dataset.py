@@ -3,6 +3,8 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Literal
 
+import numpy as np
+import soundfile as sf
 import torch
 import torchaudio
 from torch.utils.data import Dataset
@@ -19,6 +21,14 @@ GTZAN_GENRES = [
     "reggae",
     "rock",
 ]
+
+
+def _readable_wav(path: Path) -> bool:
+    try:
+        with sf.SoundFile(str(path), "r") as f:
+            return f.frames > 0
+    except Exception:
+        return False
 
 
 class GTZANDataset(Dataset):
@@ -47,6 +57,7 @@ class GTZANDataset(Dataset):
             self.items = file_list
         else:
             self.items = []
+            skipped = 0
             for label, genre in enumerate(GTZAN_GENRES):
                 genre_dir = self.root / genre
                 if not genre_dir.is_dir():
@@ -54,7 +65,12 @@ class GTZANDataset(Dataset):
                 for path in sorted(genre_dir.glob("*.wav")):
                     if path.name.startswith("._"):
                         continue
+                    if not _readable_wav(path):
+                        skipped += 1
+                        continue
                     self.items.append((path, label))
+            if skipped:
+                print(f"skipped {skipped} unreadable wav file(s)")
 
         if not self.items:
             raise FileNotFoundError(f"No GTZAN wav files found under {self.root}")
@@ -72,14 +88,8 @@ class GTZANDataset(Dataset):
         return len(self.items)
 
     def _load_audio(self, path: Path) -> torch.Tensor:
-        # Prefer soundfile: torchaudio>=2.11 routes load() through torchcodec.
-        try:
-            import soundfile as sf
-
-            data, sr = sf.read(str(path), dtype="float32", always_2d=True)
-            wav = torch.from_numpy(data.T)  # (channels, samples)
-        except Exception:
-            wav, sr = torchaudio.load(path)
+        data, sr = sf.read(str(path), dtype="float32", always_2d=True)
+        wav = torch.from_numpy(np.ascontiguousarray(data.T))  # (channels, samples)
         if wav.shape[0] > 1:
             wav = wav.mean(dim=0, keepdim=True)
         if sr != self.sample_rate:
@@ -88,7 +98,6 @@ class GTZANDataset(Dataset):
         if wav.numel() < self.num_samples:
             wav = torch.nn.functional.pad(wav, (0, self.num_samples - wav.numel()))
         else:
-            # center crop for reproducibility
             start = max(0, (wav.numel() - self.num_samples) // 2)
             wav = wav[start : start + self.num_samples]
         return wav
