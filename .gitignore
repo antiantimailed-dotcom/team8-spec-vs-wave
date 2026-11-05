@@ -11,6 +11,8 @@ venv/
 checkpoints/*.pt
 checkpoints/*.pth
 runs/
+# Also ignore events if --log-dir points elsewhere
+events.out.tfevents.*
 wandb/
 *.log
 
