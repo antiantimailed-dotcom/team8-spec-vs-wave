@@ -1,0 +1,30 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.env
+.python-version
+
+# ML artifacts
+checkpoints/*.pt
+checkpoints/*.pth
+runs/
+wandb/
+*.log
+
+# Data (keep local symlinks/copies out of git)
+data/gtzan
+data/fma
+data/fma_metadata
+*.wav
+*.mp3
+*.tar.gz
+*.zip
+
+# OS / IDE
+.DS_Store
+.idea/
+.vscode/
+*.swp
