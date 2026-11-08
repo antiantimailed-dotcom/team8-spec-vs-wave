@@ -28,3 +28,9 @@ data/fma_metadata
 .idea/
 .vscode/
 *.swp
+
+data/
+runs/
+*.npy
+*.pt
+logs/
