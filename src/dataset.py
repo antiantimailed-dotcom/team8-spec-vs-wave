@@ -1,113 +1,59 @@
+"""Datasets that read pre-decoded clips (see scripts/preprocess.py).
+
+Both models take raw audio in; the spectrogram model makes its own log-mel on the GPU
+(model.py), so the two see exactly the same samples.
+
+- TrainCrops: each item is one random 2.7 s crop of a training clip. The dataset
+  repeats every clip `crops_per_clip` times, so one epoch draws that many crops per clip.
+- EvalClips: each item is a whole clip cut into its 11 non-overlapping slices; the
+  trainer averages the model's predictions over them.
+"""
 from __future__ import annotations
 
-from pathlib import Path
-from typing import Literal
-
 import numpy as np
-import soundfile as sf
 import torch
-import torchaudio
 from torch.utils.data import Dataset
 
-GTZAN_GENRES = [
-    "blues",
-    "classical",
-    "country",
-    "disco",
-    "hiphop",
-    "jazz",
-    "metal",
-    "pop",
-    "reggae",
-    "rock",
-]
+from common import CLIP_LEN, N_SLICES, SLICE, cache_path, label_of
 
 
-def _readable_wav(path: Path) -> bool:
-    try:
-        with sf.SoundFile(str(path), "r") as f:
-            return f.frames > 0
-    except Exception:
-        return False
+class _CachedClips(Dataset):
+    def __init__(self, dataset: str, clip_ids: list[str], labels: dict[str, str] | None = None):
+        kept, missing = [], []
+        for cid in clip_ids:
+            (kept if cache_path(dataset, cid).exists() else missing).append(cid)
+        if missing:
+            print(f"  note: {len(missing)} clip(s) not in the cache were skipped, e.g. {missing[:3]}")
+        if not kept:
+            raise SystemExit(f"No cached clips found for {dataset}: run scripts/preprocess.py first.")
+        self.dataset = dataset
+        self.ids = kept
+        self.y = [label_of(dataset, c, labels) for c in kept]
+
+    def _load(self, i: int) -> np.ndarray:
+        return np.load(cache_path(self.dataset, self.ids[i]), mmap_mode="r")
 
 
-class GTZANDataset(Dataset):
-    """GTZAN genre clips as either mel-spectrograms or raw waveforms."""
-
-    def __init__(
-        self,
-        root: str | Path,
-        representation: Literal["spectrogram", "waveform"] = "spectrogram",
-        sample_rate: int = 22050,
-        duration_sec: float = 5.0,
-        n_mels: int = 128,
-        n_fft: int = 2048,
-        hop_length: int = 512,
-        file_list: list[tuple[Path, int]] | None = None,
-    ) -> None:
-        self.root = Path(root)
-        self.representation = representation
-        self.sample_rate = sample_rate
-        self.num_samples = int(sample_rate * duration_sec)
-        self.n_mels = n_mels
-        self.n_fft = n_fft
-        self.hop_length = hop_length
-
-        if file_list is not None:
-            self.items = file_list
-        else:
-            self.items = []
-            skipped = 0
-            for label, genre in enumerate(GTZAN_GENRES):
-                genre_dir = self.root / genre
-                if not genre_dir.is_dir():
-                    continue
-                for path in sorted(genre_dir.glob("*.wav")):
-                    if path.name.startswith("._"):
-                        continue
-                    if not _readable_wav(path):
-                        skipped += 1
-                        continue
-                    self.items.append((path, label))
-            if skipped:
-                print(f"skipped {skipped} unreadable wav file(s)")
-
-        if not self.items:
-            raise FileNotFoundError(f"No GTZAN wav files found under {self.root}")
-
-        self.mel = torchaudio.transforms.MelSpectrogram(
-            sample_rate=sample_rate,
-            n_fft=n_fft,
-            hop_length=hop_length,
-            n_mels=n_mels,
-            power=2.0,
-        )
-        self.db = torchaudio.transforms.AmplitudeToDB(stype="power")
+class TrainCrops(_CachedClips):
+    def __init__(self, dataset, clip_ids, labels=None, crops_per_clip: int = 8):
+        super().__init__(dataset, clip_ids, labels)
+        self.crops_per_clip = crops_per_clip
 
     def __len__(self) -> int:
-        return len(self.items)
+        return len(self.ids) * self.crops_per_clip
 
-    def _load_audio(self, path: Path) -> torch.Tensor:
-        data, sr = sf.read(str(path), dtype="float32", always_2d=True)
-        wav = torch.from_numpy(np.ascontiguousarray(data.T))  # (channels, samples)
-        if wav.shape[0] > 1:
-            wav = wav.mean(dim=0, keepdim=True)
-        if sr != self.sample_rate:
-            wav = torchaudio.functional.resample(wav, sr, self.sample_rate)
-        wav = wav.squeeze(0)
-        if wav.numel() < self.num_samples:
-            wav = torch.nn.functional.pad(wav, (0, self.num_samples - wav.numel()))
-        else:
-            start = max(0, (wav.numel() - self.num_samples) // 2)
-            wav = wav[start : start + self.num_samples]
-        return wav
+    def __getitem__(self, idx: int):
+        i = idx % len(self.ids)
+        # torch's RNG is seeded per DataLoader worker, so crops differ across workers
+        off = int(torch.randint(0, CLIP_LEN - SLICE + 1, (1,)))
+        x = np.array(self._load(i)[off:off + SLICE], dtype=np.float32)
+        return torch.from_numpy(x), self.y[i]
 
-    def __getitem__(self, idx: int) -> tuple[torch.Tensor, int]:
-        path, label = self.items[idx]
-        wav = self._load_audio(path)
-        if self.representation == "waveform":
-            x = wav.unsqueeze(0)  # (1, T)
-        else:
-            spec = self.db(self.mel(wav))  # (n_mels, time)
-            x = spec.unsqueeze(0)  # (1, n_mels, time)
-        return x, label
+
+class EvalClips(_CachedClips):
+    def __len__(self) -> int:
+        return len(self.ids)
+
+    def __getitem__(self, i: int):
+        x = np.array(self._load(i), dtype=np.float32).reshape(N_SLICES, SLICE)
+        return torch.from_numpy(x), self.y[i], i
