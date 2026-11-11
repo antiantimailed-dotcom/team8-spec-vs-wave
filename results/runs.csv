@@ -1,0 +1,14 @@
+run_id,model,dataset,split,train_size,seed,test_accuracy,test_macro_f1,best_epoch,max_epochs,train_minutes,device,git_commit,date
+gtzan_filtered_nall_spectrogram_cnn_s0_20261108-215635,spectrogram_cnn,gtzan,filtered,442,0,0.6207,0.6014,9,15,4.3,mps,01762b3,2026-11-08
+gtzan_random_nall_spectrogram_cnn_s0_20261108-220302,spectrogram_cnn,gtzan,random,442,0,0.86,0.8566,32,60,17.7,mps,01762b3,2026-11-08
+gtzan_random_nall_sample_cnn_s0_20261108-222054,sample_cnn,gtzan,random,442,0,0.76,0.7558,29,60,34.1,mps,01762b3,2026-11-08
+gtzan_filtered_nall_spectrogram_cnn_s0_20261108-225510,spectrogram_cnn,gtzan,filtered,442,0,0.6345,0.615,19,60,8.5,mps,01762b3,2026-11-08
+gtzan_filtered_nall_sample_cnn_s0_20261108-230351,sample_cnn,gtzan,filtered,442,0,0.6552,0.6494,16,60,21.9,mps,01762b3,2026-11-08
+gtzan_random_nall_spectrogram_cnn_s1_20261108-232602,spectrogram_cnn,gtzan,random,442,1,0.82,0.8138,38,60,12.4,mps,01762b3,2026-11-08
+gtzan_random_nall_sample_cnn_s1_20261108-233834,sample_cnn,gtzan,random,442,1,0.7667,0.7575,12,60,18.2,mps,01762b3,2026-11-08
+gtzan_filtered_nall_spectrogram_cnn_s1_20261108-235656,spectrogram_cnn,gtzan,filtered,442,1,0.5828,0.5715,11,60,5.6,mps,01762b3,2026-11-09
+gtzan_filtered_nall_sample_cnn_s1_20261109-000243,sample_cnn,gtzan,filtered,442,1,0.6034,0.5851,22,60,31.3,mps,01762b3,2026-11-09
+gtzan_random_nall_spectrogram_cnn_s2_20261109-003418,spectrogram_cnn,gtzan,random,442,2,0.8333,0.8288,38,60,13.6,mps,01762b3,2026-11-09
+gtzan_random_nall_sample_cnn_s2_20261109-004759,sample_cnn,gtzan,random,442,2,0.6867,0.685,15,60,24.0,mps,01762b3,2026-11-09
+gtzan_filtered_nall_spectrogram_cnn_s2_20261109-011213,spectrogram_cnn,gtzan,filtered,442,2,0.6448,0.6268,36,60,13.4,mps,01762b3,2026-11-09
+gtzan_filtered_nall_sample_cnn_s2_20261109-012544,sample_cnn,gtzan,filtered,442,2,0.5621,0.5436,17,60,24.4,mps,01762b3,2026-11-09
