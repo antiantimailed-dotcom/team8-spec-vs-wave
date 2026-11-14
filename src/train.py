@@ -14,9 +14,11 @@ import argparse
 import copy
 import csv
 import json
+import os
 import subprocess
 import time
 from datetime import datetime
+from pathlib import Path
 
 import numpy as np
 import torch
@@ -68,6 +70,29 @@ def scores(probs, y, n_classes):
     pred = probs.argmax(1)
     return (accuracy_score(y, pred),
             f1_score(y, pred, labels=list(range(n_classes)), average="macro", zero_division=0), pred)
+
+
+def append_result_row(path, row: dict) -> None:
+    """Append one row to the shared results CSV, writing the header only if the file is empty.
+
+    Cluster jobs may finish at the same moment, so the emptiness check and the write both
+    happen while holding an exclusive lock. The size is read with fstat *after* locking:
+    f.tell() on a freshly opened append-mode file is 0 for every process that opened the
+    file while it was still empty, which let a second job write a duplicate header.
+    """
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "a", newline="") as f:
+        try:
+            import fcntl
+            fcntl.flock(f, fcntl.LOCK_EX)
+        except (ImportError, OSError):
+            pass
+        w = csv.DictWriter(f, fieldnames=list(row))
+        if os.fstat(f.fileno()).st_size == 0:
+            w.writeheader()
+        w.writerow(row)
+        f.flush()                              # write out before the lock is released on close
 
 
 def main() -> None:
@@ -181,17 +206,7 @@ def main() -> None:
            "test_macro_f1": round(te_f1, 4), "best_epoch": best_epoch, "max_epochs": args.epochs,
            "train_minutes": round(minutes, 1), "device": str(device), "git_commit": git_commit(),
            "date": datetime.now().strftime("%Y-%m-%d")}
-    RESULTS_CSV.parent.mkdir(exist_ok=True)
-    with open(RESULTS_CSV, "a", newline="") as f:
-        try:                                   # cluster jobs may finish at the same moment
-            import fcntl
-            fcntl.flock(f, fcntl.LOCK_EX)
-        except (ImportError, OSError):
-            pass
-        w = csv.DictWriter(f, fieldnames=list(row))
-        if f.tell() == 0:
-            w.writeheader()
-        w.writerow(row)
+    append_result_row(RESULTS_CSV, row)
     print(f"saved {run_dir.relative_to(RUNS_DIR.parent)} and a row in {RESULTS_CSV.relative_to(RUNS_DIR.parent)}")
 
 
