@@ -66,6 +66,18 @@ bash scripts/run_gtzan_rq2.sh                 # RQ2: 12 GTZAN runs (fine on a Ma
 mkdir -p logs && sbatch slurm/rq1_sweep.sbatch   # RQ1: 24 FMA-small runs on the HPC cluster
 ```
 
+RQ1 analysis, once the FMA-small runs are in `results/runs.csv`:
+
+```bash
+python scripts/plot_rq1_gap.py                    # accuracy and macro-F1
+python scripts/plot_rq1_gap.py --metric macro_f1  # or: accuracy | both
+```
+
+It averages over seeds, computes the gap (spectrogram CNN minus SampleCNN, paired by seed)
+at each training size, prints whether the gap at 6,400 clips is smaller than at 800, and
+writes `results/rq1_gap.csv` and `results/rq1_gap.png`. `--quick` runs are left out unless
+you pass `--include-quick`; `--input` / `--outdir` change where it reads and writes.
+
 ## Outputs
 
 - `results/runs.csv`: one row per run (commit this; it is what the report is built from)
