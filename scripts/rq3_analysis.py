@@ -13,9 +13,11 @@ Part 1, per genre (from runs/<run_id>/predictions.csv), for each setting:
          figures/rq3_confusion_<setting>.png, figures/rq3_genre_f1_<setting>.png
 
 Part 2, --filters: plays pure sine tones (30 Hz to 10 kHz) through each trained SampleCNN
-and records which frequency every channel of the first layers responds to most. If the
-learned filters behave like a mel filterbank, many channels prefer low frequencies (a mel
-scale spends about 30% of its 128 bands below 1 kHz; a linear scale spends 9%).
+and records which frequency every channel of the first layers responds to most, counting
+only channels that are clearly tuned to one frequency range. The same probe on untrained
+SampleCNNs (random weights) is the control. A learned, mel-like layout shows up as far more
+tuned channels than the control, with about 30% of them below 1 kHz (mel) rather than the
+9% of a linear scale or the ~60% a random test tone would give.
   Writes results/rq3_filter_peaks.csv, figures/rq3_filter_response.png, figures/rq3_filter_peaks.png
 """
 from __future__ import annotations
@@ -144,6 +146,35 @@ def mel_to_hz(m):
     return np.where(m < 15, m * (200 / 3), 1000 * np.exp((m - 15) * np.log(6.4) / 27))
 
 
+TUNED_RATIO = 2.0   # a channel counts as frequency-tuned if its best tone gets >= 2x its median response
+
+
+def tone_responses(model, tones, n_layers: int, device):
+    """Mean activation of every channel to every tone: one (channels, tones) array per layer."""
+    import torch
+    resp = [[] for _ in range(n_layers)]
+    with torch.no_grad():
+        for b in range(0, len(tones), 16):
+            x = model.stem(tones[b:b + 16].to(device).unsqueeze(1))
+            for L in range(n_layers):                     # layer 0 = stem, then blocks 1..n-1
+                if L > 0:
+                    x = model.blocks[L - 1](x)
+                resp[L].append(x.mean(-1).cpu())          # mean over time: (batch, channels)
+    return [torch.cat(r).numpy().T for r in resp]
+
+
+def channel_table(R_layers, freqs, state: str, seed, run_id: str) -> list[dict]:
+    rows = []
+    for L, R in enumerate(R_layers):
+        peak, med = R.max(1), np.median(R, 1)
+        for c in range(R.shape[0]):
+            active = bool(peak[c] > 1e-6)
+            rows.append({"state": state, "run_id": run_id, "seed": seed, "layer": L, "channel": c,
+                         "active": active, "tuned": bool(active and peak[c] >= TUNED_RATIO * max(med[c], 1e-9)),
+                         "peak_hz": float(freqs[R[c].argmax()]) if active else np.nan})
+    return rows
+
+
 def probe_filters(setting: dict, n_layers: int, lines: list):
     import torch
     from common import N_MELS, SAMPLE_RATE, SLICE
@@ -156,65 +187,78 @@ def probe_filters(setting: dict, n_layers: int, lines: list):
     freqs = np.geomspace(30, 10000, 160)
     t = np.arange(SLICE) / SAMPLE_RATE
     tones = torch.from_numpy((0.1 * np.sin(2 * np.pi * freqs[:, None] * t[None, :])).astype(np.float32))
-    records, example = [], None
-    for _, r in runs.iterrows():
+    rows, examples = [], {}
+    for i, (_, r) in enumerate(runs.iterrows()):
         ckpt = torch.load(r["run_dir"] / "best.pt", map_location="cpu", weights_only=False)
-        model = build_model(WAVE, len(ckpt["genres"]))
-        model.load_state_dict(ckpt["model"]); model.to(device).eval()
-        resp = [[] for _ in range(n_layers)]
-        with torch.no_grad():
-            for b in range(0, len(freqs), 16):
-                x = model.stem(tones[b:b + 16].to(device).unsqueeze(1))
-                for L in range(n_layers):                     # layer 0 = stem, then blocks 1..n-1
-                    if L > 0:
-                        x = model.blocks[L - 1](x)
-                    resp[L].append(x.mean(-1).cpu())          # mean activation over time: (batch, channels)
-        for L in range(n_layers):
-            R = torch.cat(resp[L]).numpy().T                  # (channels, freqs)
-            peak = R.max(1)
-            for c in np.where(peak > 1e-6)[0]:               # skip channels that never fire
-                records.append({"run_id": r["run_id"], "seed": r["seed"], "layer": L, "channel": int(c),
-                                "peak_hz": float(freqs[R[c].argmax()])})
-        if example is None:
-            example = (r["seed"], [torch.cat(resp[L]).numpy().T for L in range(n_layers)])
-    df = pd.DataFrame(records)
+        n_classes = len(ckpt["genres"])
+        trained = build_model(WAVE, n_classes); trained.load_state_dict(ckpt["model"])
+        torch.manual_seed(1000 + i)                       # control: same architecture, random weights
+        untrained = build_model(WAVE, n_classes)
+        for state, m in (("trained", trained), ("untrained", untrained)):
+            R = tone_responses(m.to(device).eval(), tones, n_layers, device)
+            rows += channel_table(R, freqs, state, r["seed"], r["run_id"])
+            examples.setdefault(state, (r["seed"], R))
+    df = pd.DataFrame(rows)
     df.to_csv(RESULTS / "rq3_filter_peaks.csv", index=False, float_format="%.1f")
 
     mel_centers = mel_to_hz(np.linspace(hz_to_mel(0), hz_to_mel(SAMPLE_RATE / 2), N_MELS + 2)[1:-1])
-    mel_low = float(np.mean(mel_centers < 1000)); lin_low = 1000 / (SAMPLE_RATE / 2)
-    lines += ["## SampleCNN filter frequencies (sine-tone probe)", "",
-              f"Reference: a {N_MELS}-band mel scale puts {100 * mel_low:.0f}% of its bands below 1 kHz; "
-              f"a linear scale up to {SAMPLE_RATE // 2:,} Hz puts {100 * lin_low:.0f}%.", "",
-              "| Layer | Active channels (all seeds) | Median preferred frequency | Share below 1 kHz |", "|---|---|---|---|"]
-    for L, g in df.groupby("layer"):
-        name = "stem" if L == 0 else f"block {L}"
-        lines.append(f"| {name} | {len(g)} | {g.peak_hz.median():,.0f} Hz | {100 * np.mean(g.peak_hz < 1000):.0f}% |")
-    lines.append("")
+    ref_mel = np.mean(mel_centers < 1000)
+    ref_lin = 1000 / (SAMPLE_RATE / 2)
+    ref_grid = np.mean(freqs < 1000)
+    lines += ["## SampleCNN filter frequencies (pure-tone probe)", "",
+              f"Each channel's preferred frequency = the test tone it responds to most. Only **tuned** channels "
+              f"count (best tone ≥ {TUNED_RATIO:g}× the channel's median response). Control: the same probe on "
+              f"untrained SampleCNNs with random weights.", "",
+              f"Reference shares below 1 kHz: mel scale ({N_MELS} bands) {100 * ref_mel:.0f}%, linear scale "
+              f"{100 * ref_lin:.0f}%. A channel with no real preference lands on a random test tone, and "
+              f"{100 * ref_grid:.0f}% of the tones are below 1 kHz.", "",
+              "| Layer | Trained: tuned channels | Trained: median preferred | Trained: below 1 kHz "
+              "| Untrained: tuned channels | Untrained: median preferred | Untrained: below 1 kHz |",
+              "|---|---|---|---|---|---|---|"]
+    for L in sorted(df.layer.unique()):
+        cells = []
+        for state in ("trained", "untrained"):
+            g = df[(df.layer == L) & (df.state == state)]
+            tg = g[g.tuned]
+            cells += [f"{len(tg)} of {len(g)} ({100 * len(tg) / max(len(g), 1):.0f}%)",
+                      f"{tg.peak_hz.median():,.0f} Hz" if len(tg) else "—",
+                      f"{100 * np.mean(tg.peak_hz < 1000):.0f}%" if len(tg) else "—"]
+        lines.append(f"| {'stem' if L == 0 else f'block {L}'} | " + " | ".join(cells) + " |")
+    lines += ["", "Read it this way: a learned, mel-like frequency layout shows up as **many more tuned channels "
+              "than the untrained control**, with a share below 1 kHz near the mel reference rather than the "
+              "random-tone level.", ""]
 
-    seed, Rs = example
-    fig, axes = plt.subplots(1, n_layers, figsize=(4 * n_layers, 4.5), squeeze=False)
-    for L, ax in enumerate(axes[0]):
-        R = Rs[L]; keep = R.max(1) > 1e-6
-        Rn = R[keep] / R[keep].max(1, keepdims=True)
-        order = np.argsort(Rn.argmax(1))
-        ax.imshow(Rn[order], aspect="auto", origin="lower", cmap="magma",
-                  extent=[np.log10(freqs[0]), np.log10(freqs[-1]), 0, len(order)])
-        ticks = [100, 300, 1000, 3000, 10000]
-        ax.set_xticks(np.log10(ticks), [f"{f:g}" if f < 1000 else f"{f // 1000:g}k" for f in ticks])
-        ax.set_xlabel("tone frequency (Hz)"); ax.set_title("stem" if L == 0 else f"block {L}")
-        if L == 0:
-            ax.set_ylabel("channel (sorted by preferred frequency)")
-    fig.suptitle(f"SampleCNN channel responses to pure tones (seed {seed}), normalized per channel")
+    fig, axes = plt.subplots(2, n_layers, figsize=(4 * n_layers, 8), squeeze=False)
+    for row, state in enumerate(("trained", "untrained")):
+        seed, Rs = examples[state]
+        for L, ax in enumerate(axes[row]):
+            R = Rs[L]; keep = R.max(1) > 1e-6
+            if not keep.any():
+                ax.set_axis_off(); continue
+            Rn = R[keep] / R[keep].max(1, keepdims=True)
+            order = np.argsort(Rn.argmax(1))
+            ax.imshow(Rn[order], aspect="auto", origin="lower", cmap="magma", vmin=0, vmax=1,
+                      extent=[np.log10(freqs[0]), np.log10(freqs[-1]), 0, len(order)])
+            ticks = [100, 300, 1000, 3000, 10000]
+            ax.set_xticks(np.log10(ticks), [f"{f:g}" if f < 1000 else f"{f // 1000:g}k" for f in ticks])
+            ax.set_title(f"{state}: {'stem' if L == 0 else f'block {L}'}")
+            if row == 1:
+                ax.set_xlabel("tone frequency (Hz)")
+            if L == 0:
+                ax.set_ylabel("channel (sorted by preferred frequency)")
+    fig.suptitle("SampleCNN channel responses to pure tones, normalized per channel (top: trained, bottom: random weights)")
     fig.tight_layout(); fig.savefig(FIGURES / "rq3_filter_response.png", dpi=150); plt.close(fig)
 
-    fig, ax = plt.subplots(figsize=(7, 4.2))
+    deepest = int(df.layer.max())
+    fig, ax = plt.subplots(figsize=(7.5, 4.3))
     bins = np.geomspace(30, 10000, 25)
-    deep = df[df.layer == df.layer.max()]
-    ax.hist(deep.peak_hz, bins=bins, density=True, alpha=0.6, color="#E07A2F",
-            label=f"SampleCNN block {int(df.layer.max())} channels (all seeds)")
+    for state, col in (("trained", "#E07A2F"), ("untrained", "#8A8F98")):
+        v = df[(df.layer == deepest) & (df.state == state) & df.tuned].peak_hz
+        if len(v):
+            ax.hist(v, bins=bins, density=True, alpha=0.55, color=col, label=f"{state} SampleCNN, block {deepest} (tuned channels)")
     ax.hist(mel_centers, bins=bins, density=True, histtype="step", lw=2, color="#2F6FB0", label=f"{N_MELS} mel band centers")
     ax.set_xscale("log"); ax.set_xlabel("preferred frequency (Hz)"); ax.set_ylabel("density")
-    ax.set_title("Do SampleCNN's filters space out like a mel scale?"); ax.legend()
+    ax.set_title("Preferred frequencies: trained vs. random weights vs. mel scale"); ax.legend(fontsize=8)
     fig.tight_layout(); fig.savefig(FIGURES / "rq3_filter_peaks.png", dpi=150); plt.close(fig)
     print("  filters: wrote rq3_filter_peaks.csv and two figures")
 
