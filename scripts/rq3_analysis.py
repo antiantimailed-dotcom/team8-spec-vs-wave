@@ -1,0 +1,242 @@
+"""RQ3: where do the two models make different mistakes, and what does SampleCNN learn?
+
+    python scripts/rq3_analysis.py                    # per-genre analysis (no GPU needed)
+    python scripts/rq3_analysis.py --filters          # also probe SampleCNN's learned filters (needs torch + best.pt)
+
+Part 1, per genre (from runs/<run_id>/predictions.csv), for each setting:
+    gtzan_filtered   GTZAN, fault-filtered split
+    fma_6400         FMA-small, 6,400 training clips
+  - confusion matrices averaged over seeds (rows = true genre, normalized to 1)
+  - per-genre F1, mean ± SD over seeds, and spectrogram - SampleCNN difference
+  - each model's most frequent confusions
+  Writes results/rq3_<setting>.md, results/rq3_per_genre_<setting>.csv,
+         figures/rq3_confusion_<setting>.png, figures/rq3_genre_f1_<setting>.png
+
+Part 2, --filters: plays pure sine tones (30 Hz to 10 kHz) through each trained SampleCNN
+and records which frequency every channel of the first layers responds to most. If the
+learned filters behave like a mel filterbank, many channels prefer low frequencies (a mel
+scale spends about 30% of its 128 bands below 1 kHz; a linear scale spends 9%).
+  Writes results/rq3_filter_peaks.csv, figures/rq3_filter_response.png, figures/rq3_filter_peaks.png
+"""
+from __future__ import annotations
+
+import argparse
+import sys
+from pathlib import Path
+
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt  # noqa: E402
+import numpy as np  # noqa: E402
+import pandas as pd  # noqa: E402
+from sklearn.metrics import confusion_matrix, f1_score  # noqa: E402
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+from results_io import REPO, load_predictions, load_runs  # noqa: E402
+
+SPEC, WAVE = "spectrogram_cnn", "sample_cnn"
+LABEL = {SPEC: "Spectrogram CNN", WAVE: "SampleCNN"}
+SETTINGS = {
+    "gtzan_filtered": dict(dataset="gtzan", split="filtered", size=None, title="GTZAN fault-filtered"),
+    "gtzan_random": dict(dataset="gtzan", split="random", size=None, title="GTZAN random split"),
+    "fma_6400": dict(dataset="fma_small", split="official", size=6400, title="FMA-small, 6,400 clips"),
+    "fma_800": dict(dataset="fma_small", split="official", size=800, title="FMA-small, 800 clips"),
+}
+RESULTS, FIGURES = REPO / "results", REPO / "figures"
+
+
+# ---------------- Part 1: per-genre errors ----------------
+def select(setting: dict, model: str) -> pd.DataFrame:
+    runs = load_runs(setting["dataset"], setting["split"], models=[model])
+    if setting["size"] is None:
+        return runs[runs["size"].isna()]
+    return runs[runs["size"] == setting["size"]]
+
+
+def genre_stats(runs: pd.DataFrame):
+    mats, f1s, genres = [], [], None
+    for _, r in runs.iterrows():
+        p = load_predictions(r["run_dir"])
+        genres = genres or [c[2:] for c in p.columns if c.startswith("p_")]
+        cm = confusion_matrix(p["true"], p["pred"], labels=genres).astype(float)
+        mats.append(cm / np.maximum(cm.sum(1, keepdims=True), 1))
+        f1s.append(f1_score(p["true"], p["pred"], labels=genres, average=None, zero_division=0))
+    return genres, np.stack(mats), np.stack(f1s)
+
+
+def per_genre(name: str, setting: dict, lines: list):
+    out = {}
+    for m in (SPEC, WAVE):
+        runs = select(setting, m)
+        if runs.empty:
+            print(f"  {name}: no full {m} runs found, skipping this setting")
+            return
+        out[m] = (runs["seed"].tolist(),) + genre_stats(runs)
+    genres = out[SPEC][1]
+    if out[WAVE][1] != genres:
+        raise SystemExit(f"{name}: the two models' prediction files list genres in a different order")
+    (s_seeds, _, s_cm, s_f1), (w_seeds, _, w_cm, w_f1) = out[SPEC], out[WAVE]
+    sd = lambda a: a.std(0, ddof=1) if len(a) > 1 else np.full(a.shape[1], np.nan)  # noqa: E731
+    tab = pd.DataFrame({
+        "genre": genres,
+        "spec_f1_mean": s_f1.mean(0), "spec_f1_sd": sd(s_f1),
+        "wave_f1_mean": w_f1.mean(0), "wave_f1_sd": sd(w_f1),
+        "spec_recall": np.diag(s_cm.mean(0)), "wave_recall": np.diag(w_cm.mean(0)),
+    })
+    tab["f1_diff"] = tab["spec_f1_mean"] - tab["wave_f1_mean"]
+    common = sorted(set(s_seeds) & set(w_seeds))
+    tab["seeds_spec_better"] = [
+        sum(s_f1[s_seeds.index(s), g] > w_f1[w_seeds.index(s), g] for s in common) for g in range(len(genres))]
+    tab = tab.sort_values("f1_diff", ascending=False)
+    RESULTS.mkdir(exist_ok=True); FIGURES.mkdir(exist_ok=True)
+    tab.to_csv(RESULTS / f"rq3_per_genre_{name}.csv", index=False, float_format="%.4f")
+
+    lines += [f"## {setting['title']} ({len(s_seeds)} spectrogram / {len(w_seeds)} SampleCNN seeds)", "",
+              f"| Genre | Spectrogram F1 | SampleCNN F1 | Difference | Seeds spectrogram better (of {len(common)}) |",
+              "|---|---|---|---|---|"]
+    for _, r in tab.iterrows():
+        lines.append(f"| {r.genre} | {r.spec_f1_mean:.2f} ± {r.spec_f1_sd:.2f} | {r.wave_f1_mean:.2f} ± {r.wave_f1_sd:.2f} "
+                     f"| {r.f1_diff:+.2f} | {r.seeds_spec_better} |")
+    lines.append("")
+    for m, cm in ((SPEC, s_cm), (WAVE, w_cm)):
+        mean = cm.mean(0).copy(); np.fill_diagonal(mean, 0)
+        top = np.dstack(np.unravel_index(np.argsort(mean, axis=None)[::-1][:5], mean.shape))[0]
+        lines.append(f"**{LABEL[m]}, most frequent confusions:** " + "; ".join(
+            f"{genres[i]} → {genres[j]} ({100 * mean[i, j]:.0f}%)" for i, j in top))
+    lines.append("")
+
+    fig, axes = plt.subplots(1, 2, figsize=(14, 6.2))
+    for ax, m, cm in ((axes[0], SPEC, s_cm), (axes[1], WAVE, w_cm)):
+        mean = cm.mean(0)
+        ax.imshow(mean, cmap="Blues", vmin=0, vmax=1)
+        ax.set_xticks(range(len(genres)), genres, rotation=45, ha="right")
+        ax.set_yticks(range(len(genres)), genres)
+        ax.set_xlabel("predicted"); ax.set_ylabel("true")
+        ax.set_title(f"{LABEL[m]} (mean over {len(cm)} seeds)")
+        for i in range(len(genres)):
+            for j in range(len(genres)):
+                if mean[i, j] >= 0.05:
+                    ax.text(j, i, f"{mean[i, j]:.2f}", ha="center", va="center", fontsize=7,
+                            color="white" if mean[i, j] > 0.55 else "#14213D")
+    fig.suptitle(f"Confusion matrices, {setting['title']} (rows sum to 1)")
+    fig.tight_layout(); fig.savefig(FIGURES / f"rq3_confusion_{name}.png", dpi=150); plt.close(fig)
+
+    t = tab.iloc[::-1]
+    y = np.arange(len(t))
+    fig, ax = plt.subplots(figsize=(7.5, 0.45 * len(t) + 1.5))
+    ax.barh(y + 0.2, t["spec_f1_mean"], 0.4, xerr=t["spec_f1_sd"].fillna(0), label=LABEL[SPEC], color="#2F6FB0", capsize=3)
+    ax.barh(y - 0.2, t["wave_f1_mean"], 0.4, xerr=t["wave_f1_sd"].fillna(0), label=LABEL[WAVE], color="#E07A2F", capsize=3)
+    ax.set_yticks(y, t["genre"]); ax.set_xlim(0, 1); ax.set_xlabel("test F1 (mean ± SD over seeds)")
+    ax.set_title(f"Per-genre F1, {setting['title']}\n(sorted: biggest spectrogram advantage at top)", fontsize=10)
+    ax.legend(loc="lower right"); ax.grid(axis="x", alpha=0.3)
+    fig.tight_layout(); fig.savefig(FIGURES / f"rq3_genre_f1_{name}.png", dpi=150); plt.close(fig)
+    print(f"  {name}: wrote rq3_per_genre_{name}.csv and two figures")
+
+
+# ---------------- Part 2: SampleCNN filter frequencies ----------------
+def hz_to_mel(f):   # Slaney mel scale (what the spectrogram model uses)
+    f = np.asarray(f, float)
+    return np.where(f < 1000, f / (200 / 3), 15 + np.log(np.maximum(f, 1e-9) / 1000) / (np.log(6.4) / 27))
+
+
+def mel_to_hz(m):
+    m = np.asarray(m, float)
+    return np.where(m < 15, m * (200 / 3), 1000 * np.exp((m - 15) * np.log(6.4) / 27))
+
+
+def probe_filters(setting: dict, n_layers: int, lines: list):
+    import torch
+    from common import N_MELS, SAMPLE_RATE, SLICE
+    from model import build_model
+
+    runs = select(setting, WAVE)
+    if runs.empty:
+        print("  --filters: no full SampleCNN runs for this setting"); return
+    device = "mps" if torch.backends.mps.is_available() else "cuda" if torch.cuda.is_available() else "cpu"
+    freqs = np.geomspace(30, 10000, 160)
+    t = np.arange(SLICE) / SAMPLE_RATE
+    tones = torch.from_numpy((0.1 * np.sin(2 * np.pi * freqs[:, None] * t[None, :])).astype(np.float32))
+    records, example = [], None
+    for _, r in runs.iterrows():
+        ckpt = torch.load(r["run_dir"] / "best.pt", map_location="cpu", weights_only=False)
+        model = build_model(WAVE, len(ckpt["genres"]))
+        model.load_state_dict(ckpt["model"]); model.to(device).eval()
+        resp = [[] for _ in range(n_layers)]
+        with torch.no_grad():
+            for b in range(0, len(freqs), 16):
+                x = model.stem(tones[b:b + 16].to(device).unsqueeze(1))
+                for L in range(n_layers):                     # layer 0 = stem, then blocks 1..n-1
+                    if L > 0:
+                        x = model.blocks[L - 1](x)
+                    resp[L].append(x.mean(-1).cpu())          # mean activation over time: (batch, channels)
+        for L in range(n_layers):
+            R = torch.cat(resp[L]).numpy().T                  # (channels, freqs)
+            peak = R.max(1)
+            for c in np.where(peak > 1e-6)[0]:               # skip channels that never fire
+                records.append({"run_id": r["run_id"], "seed": r["seed"], "layer": L, "channel": int(c),
+                                "peak_hz": float(freqs[R[c].argmax()])})
+        if example is None:
+            example = (r["seed"], [torch.cat(resp[L]).numpy().T for L in range(n_layers)])
+    df = pd.DataFrame(records)
+    df.to_csv(RESULTS / "rq3_filter_peaks.csv", index=False, float_format="%.1f")
+
+    mel_centers = mel_to_hz(np.linspace(hz_to_mel(0), hz_to_mel(SAMPLE_RATE / 2), N_MELS + 2)[1:-1])
+    mel_low = float(np.mean(mel_centers < 1000)); lin_low = 1000 / (SAMPLE_RATE / 2)
+    lines += ["## SampleCNN filter frequencies (sine-tone probe)", "",
+              f"Reference: a {N_MELS}-band mel scale puts {100 * mel_low:.0f}% of its bands below 1 kHz; "
+              f"a linear scale up to {SAMPLE_RATE // 2:,} Hz puts {100 * lin_low:.0f}%.", "",
+              "| Layer | Active channels (all seeds) | Median preferred frequency | Share below 1 kHz |", "|---|---|---|---|"]
+    for L, g in df.groupby("layer"):
+        name = "stem" if L == 0 else f"block {L}"
+        lines.append(f"| {name} | {len(g)} | {g.peak_hz.median():,.0f} Hz | {100 * np.mean(g.peak_hz < 1000):.0f}% |")
+    lines.append("")
+
+    seed, Rs = example
+    fig, axes = plt.subplots(1, n_layers, figsize=(4 * n_layers, 4.5), squeeze=False)
+    for L, ax in enumerate(axes[0]):
+        R = Rs[L]; keep = R.max(1) > 1e-6
+        Rn = R[keep] / R[keep].max(1, keepdims=True)
+        order = np.argsort(Rn.argmax(1))
+        ax.imshow(Rn[order], aspect="auto", origin="lower", cmap="magma",
+                  extent=[np.log10(freqs[0]), np.log10(freqs[-1]), 0, len(order)])
+        ticks = [100, 300, 1000, 3000, 10000]
+        ax.set_xticks(np.log10(ticks), [f"{f:g}" if f < 1000 else f"{f // 1000:g}k" for f in ticks])
+        ax.set_xlabel("tone frequency (Hz)"); ax.set_title("stem" if L == 0 else f"block {L}")
+        if L == 0:
+            ax.set_ylabel("channel (sorted by preferred frequency)")
+    fig.suptitle(f"SampleCNN channel responses to pure tones (seed {seed}), normalized per channel")
+    fig.tight_layout(); fig.savefig(FIGURES / "rq3_filter_response.png", dpi=150); plt.close(fig)
+
+    fig, ax = plt.subplots(figsize=(7, 4.2))
+    bins = np.geomspace(30, 10000, 25)
+    deep = df[df.layer == df.layer.max()]
+    ax.hist(deep.peak_hz, bins=bins, density=True, alpha=0.6, color="#E07A2F",
+            label=f"SampleCNN block {int(df.layer.max())} channels (all seeds)")
+    ax.hist(mel_centers, bins=bins, density=True, histtype="step", lw=2, color="#2F6FB0", label=f"{N_MELS} mel band centers")
+    ax.set_xscale("log"); ax.set_xlabel("preferred frequency (Hz)"); ax.set_ylabel("density")
+    ax.set_title("Do SampleCNN's filters space out like a mel scale?"); ax.legend()
+    fig.tight_layout(); fig.savefig(FIGURES / "rq3_filter_peaks.png", dpi=150); plt.close(fig)
+    print("  filters: wrote rq3_filter_peaks.csv and two figures")
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--settings", nargs="+", default=["gtzan_filtered", "fma_6400"], choices=list(SETTINGS))
+    ap.add_argument("--filters", action="store_true", help="also probe SampleCNN filters (needs torch and best.pt files)")
+    ap.add_argument("--filter-setting", default="fma_6400", choices=list(SETTINGS))
+    ap.add_argument("--layers", type=int, default=4, help="stem + this many minus one blocks to probe")
+    args = ap.parse_args()
+    lines = ["# RQ3: per-genre errors and learned filters", ""]
+    for name in args.settings:
+        per_genre(name, SETTINGS[name], lines)
+    if args.filters:
+        probe_filters(SETTINGS[args.filter_setting], args.layers, lines)
+    out = RESULTS / ("rq3_" + "_".join(args.settings) + ".md")
+    RESULTS.mkdir(exist_ok=True)
+    out.write_text("\n".join(lines) + "\n")
+    print("\n".join(lines))
+    print(f"wrote {out}")
+
+
+if __name__ == "__main__":
+    main()
