@@ -2,10 +2,6 @@
 
 Accuracy on the test clips. Gap = spectrogram − SampleCNN (positive: spectrogram ahead). CIs and p-values: 10,000 bootstrap resamples of test clips, seeds averaged; McNemar: exact test per seed.
 
-## RQ1 (FMA-small)
-
-No full FMA-small runs found.
-
 ## RQ2: GTZAN random vs. fault-filtered split
 
 | Comparison | Spectrogram | SampleCNN | Gap, pts [95% CI] | p (bootstrap) | Gap per seed | McNemar p per seed |

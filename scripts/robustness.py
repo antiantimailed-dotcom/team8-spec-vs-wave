@@ -14,8 +14,10 @@ paired. Usage, from the repo root:
     python scripts/robustness.py                               # FMA 6,400 and GTZAN filtered
     python scripts/robustness.py --settings fma_6400 --limit 100   # quick check on 100 clips
 
-Writes results/robustness.csv (one row per run x condition), results/robustness.md
-(mean ± SD over seeds and the drop from clean) and figures/robustness_<setting>.png.
+Writes, per setting: results/robustness_<setting>.csv (one row per run x condition),
+results/robustness_<setting>.md (mean ± SD over seeds and the drop from clean) and
+figures/robustness_<setting>.png. Settings with no checkpoints here are skipped, and their
+files are left untouched.
 """
 from __future__ import annotations
 
@@ -157,7 +159,7 @@ def predict(model, audio: np.ndarray, device, clips_per_batch: int = 8) -> np.nd
 def run_setting(name: str, setting: dict, conditions: list[str], limit, seed: int, rows: list):
     runs = load_runs(setting["dataset"], setting["split"], models=[SPEC, WAVE])
     runs = runs[runs["size"].isna()] if setting["size"] is None else runs[runs["size"] == setting["size"]]
-    runs = runs[[(d / "best.pt").exists() for d in runs["run_dir"]]]
+    runs = runs[pd.Series([(d / "best.pt").exists() for d in runs["run_dir"]], index=runs.index, dtype=bool)]
     if runs.empty:
         print(f"{name}: no full runs with a best.pt here, skipping"); return
     genres = GENRES[setting["dataset"]]
@@ -183,7 +185,8 @@ def run_setting(name: str, setting: dict, conditions: list[str], limit, seed: in
 
 
 def summarize(df: pd.DataFrame, outdir: Path, figdir: Path):
-    lines = ["# Robustness to degraded audio", "",
+    name0 = df["setting"].iloc[0]
+    lines = [f"# Robustness to degraded audio: {SETTINGS[name0]['title']}", "",
              "Test accuracy, mean ± SD over seeds. Drop = clean − degraded, paired by seed "
              "(larger = more fragile). 'Spectrogram drops more' counts seeds.", ""]
     for name, g in df.groupby("setting", sort=False):
@@ -213,7 +216,7 @@ def summarize(df: pd.DataFrame, outdir: Path, figdir: Path):
         ax.set_ylabel("test accuracy (mean ± SD over seeds)")
         ax.set_title(f"Robustness, {SETTINGS[name]['title']}"); ax.legend(); ax.grid(axis="y", alpha=0.3)
         fig.tight_layout(); fig.savefig(figdir / f"robustness_{name}.png", dpi=150); plt.close(fig)
-    (outdir / "robustness.md").write_text("\n".join(lines) + "\n")
+    (outdir / f"robustness_{name0}.md").write_text("\n".join(lines) + "\n")
     print("\n".join(lines))
 
 
@@ -230,14 +233,15 @@ def main():
         conditions = [c for c in conditions if not c.startswith("mp3")]
     outdir, figdir = REPO / "results", REPO / "figures"
     outdir.mkdir(exist_ok=True); figdir.mkdir(exist_ok=True)
-    rows = []
     for name in args.settings:
+        rows = []
         run_setting(name, SETTINGS[name], conditions, args.limit, args.seed, rows)
-        pd.DataFrame(rows).to_csv(outdir / "robustness.csv", index=False, float_format="%.4f")  # saved as it goes
-    if rows:
+        if not rows:
+            continue
+        csv = outdir / f"robustness_{name}.csv"
+        pd.DataFrame(rows).to_csv(csv, index=False, float_format="%.4f")
         summarize(pd.DataFrame(rows), outdir, figdir)
-        print(f"wrote {outdir / 'robustness.csv'}, {outdir / 'robustness.md'} and figures/robustness_*.png")
-
+        print(f"wrote {csv}, {csv.with_suffix('.md')} and {figdir / f'robustness_{name}.png'}")
 
 if __name__ == "__main__":
     main()

@@ -15,7 +15,9 @@ training set (the "does it narrow?" test), with a bootstrap CI over the shared t
 RQ2 (GTZAN): the gap on each split, and the difference in accuracy drop between the models
 (drop_spec - drop_wave = gap_random - gap_filtered), resampling each split's test set.
 
-Writes results/significance.md (tables for the report) and results/significance.csv.
+Writes results/significance_rq1.md/.csv (FMA) and results/significance_rq2.md/.csv (GTZAN).
+Each pair is written only when that dataset's runs are present, so running this on a machine
+with only one dataset never overwrites the other dataset's results.
 """
 from __future__ import annotations
 
@@ -108,8 +110,8 @@ HEADER = ("| Comparison | Spectrogram | SampleCNN | Gap, pts [95% CI] | p (boots
 def rq1(rng, n_boot, rows, lines):
     runs = load_runs("fma_small", models=[SPEC, WAVE])
     if runs.empty:
-        lines += ["## RQ1 (FMA-small)", "", "No full FMA-small runs found.", ""]
-        return
+        print("RQ1: no full FMA-small runs here, skipping (significance_rq1.* left untouched)")
+        return False
     lines += ["## RQ1: gap by training size (FMA-small)", "", HEADER]
     per_size = {}
     for size in sorted(runs["size"].dropna().unique()):
@@ -135,6 +137,7 @@ def rq1(rng, n_boot, rows, lines):
         lines += [f"**Trend:** the gap changes by **{100 * slope:+.2f} pts per doubling** of the training set "
                   f"(95% CI [{100 * lo:+.2f}, {100 * hi:+.2f}], p = {fmt_p(p)}, {len(common)} shared test clips): "
                   f"{verdict}.", ""]
+    return True
 
 
 # ---------------- RQ2 ----------------
@@ -142,8 +145,8 @@ def rq2(rng, n_boot, rows, lines):
     runs = load_runs("gtzan", models=[SPEC, WAVE])
     runs = runs[runs["split"].isin(["random", "filtered"])]
     if runs.empty:
-        lines += ["## RQ2 (GTZAN)", "", "No full GTZAN runs found.", ""]
-        return
+        print("RQ2: no full GTZAN runs here, skipping (significance_rq2.* left untouched)")
+        return False
     lines += ["## RQ2: GTZAN random vs. fault-filtered split", "", HEADER]
     res = {s: compare(f"GTZAN {s}", runs[runs["split"] == s], rng, n_boot, rows, lines)
            for s in ("random", "filtered")}
@@ -159,6 +162,7 @@ def rq2(rng, n_boot, rows, lines):
         lines += [f"**Drop difference:** the spectrogram CNN loses **{100 * diff:+.1f} pts more** than SampleCNN "
                   f"when moving to the fault-filtered split (= gap on random − gap on filtered; "
                   f"95% CI [{100 * lo:+.1f}, {100 * hi:+.1f}], p = {fmt_p(p)}).", ""]
+    return True
 
 
 def main():
@@ -168,18 +172,18 @@ def main():
     ap.add_argument("--outdir", type=Path, default=REPO / "results")
     args = ap.parse_args()
     rng = np.random.default_rng(args.seed)
-    rows, lines = [], ["# Significance tests", "",
-                       f"Accuracy on the test clips. Gap = spectrogram − SampleCNN (positive: spectrogram ahead). "
-                       f"CIs and p-values: {args.bootstrap:,} bootstrap resamples of test clips, seeds averaged; "
-                       f"McNemar: exact test per seed.", ""]
-    rq1(rng, args.bootstrap, rows, lines)
-    rq2(rng, args.bootstrap, rows, lines)
+    intro = ["# Significance tests", "",
+             f"Accuracy on the test clips. Gap = spectrogram − SampleCNN (positive: spectrogram ahead). "
+             f"CIs and p-values: {args.bootstrap:,} bootstrap resamples of test clips, seeds averaged; "
+             f"McNemar: exact test per seed.", ""]
     args.outdir.mkdir(parents=True, exist_ok=True)
-    (args.outdir / "significance.md").write_text("\n".join(lines) + "\n")
-    pd.DataFrame(rows).to_csv(args.outdir / "significance.csv", index=False, float_format="%.5f")
-    print("\n".join(lines))
-    print(f"wrote {args.outdir / 'significance.md'} and {args.outdir / 'significance.csv'}")
-
+    for tag, fn in (("rq1", rq1), ("rq2", rq2)):
+        rows, lines = [], list(intro)
+        if fn(rng, args.bootstrap, rows, lines):
+            (args.outdir / f"significance_{tag}.md").write_text("\n".join(lines) + "\n")
+            pd.DataFrame(rows).to_csv(args.outdir / f"significance_{tag}.csv", index=False, float_format="%.5f")
+            print("\n".join(lines[len(intro):]))
+            print(f"wrote {args.outdir / f'significance_{tag}.md'} and .csv\n")
 
 if __name__ == "__main__":
     main()

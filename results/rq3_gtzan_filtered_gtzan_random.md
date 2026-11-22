@@ -36,3 +36,18 @@
 **Spectrogram CNN, most frequent confusions:** pop → hiphop (18%); country → jazz (16%); pop → disco (11%); rock → jazz (11%); reggae → hiphop (9%)
 **SampleCNN, most frequent confusions:** pop → hiphop (18%); disco → rock (16%); country → rock (13%); reggae → hiphop (13%); hiphop → reggae (13%)
 
+## SampleCNN filter frequencies (pure-tone probe), GTZAN fault-filtered
+
+Each channel's preferred frequency = the test tone it responds to most. Only **tuned** channels count (best tone ≥ 2× the channel's median response). Control: the same probe on untrained SampleCNNs with random weights.
+
+Reference shares below 1 kHz: mel scale (128 bands) 30%, linear scale 9%. A channel with no real preference lands on a random test tone, and 60% of the tones are below 1 kHz.
+
+| Layer | Trained: tuned channels | Trained: median preferred | Trained: below 1 kHz | Untrained: tuned channels | Untrained: median preferred | Untrained: below 1 kHz |
+|---|---|---|---|---|---|---|
+| stem | 175 of 384 (46%) | 10,000 Hz | 0% | 19 of 384 (5%) | 10,000 Hz | 0% |
+| block 1 | 245 of 384 (64%) | 8,640 Hz | 0% | 95 of 384 (25%) | 4,316 Hz | 9% |
+| block 2 | 204 of 384 (53%) | 6,940 Hz | 4% | 65 of 384 (17%) | 5,181 Hz | 35% |
+| block 3 | 583 of 768 (76%) | 5,374 Hz | 41% | 100 of 768 (13%) | 2,323 Hz | 42% |
+
+Read it this way: a learned, mel-like frequency layout shows up as **many more tuned channels than the untrained control**, with a share below 1 kHz near the mel reference rather than the random-tone level.
+

@@ -53,7 +53,7 @@ def load_runs(dataset: str | None = None, split: str | None = None, models=None,
     df["size"] = [nominal_size(r) for r in df["run_id"]]
     df["seed"] = df["seed"].astype(int)
     if not include_quick:
-        df = df[[not _is_quick(r) for _, r in df.iterrows()]]
+        df = df[pd.Series([not _is_quick(r) for _, r in df.iterrows()], index=df.index, dtype=bool)]
     df["run_dir"] = [RUNS_DIR / r for r in df["run_id"]]
     df["has_dir"] = [d.is_dir() for d in df["run_dir"]]
     if require_dir:
@@ -61,7 +61,7 @@ def load_runs(dataset: str | None = None, split: str | None = None, models=None,
         if len(missing):
             print(f"note: {len(missing)} run(s) in runs.csv have no runs/ folder here and are skipped "
                   f"(e.g. {missing['run_id'].iloc[0]}). Copy the runs/ folders from whoever trained them.")
-        df = df[df["has_dir"]]
+        df = df[df["has_dir"].astype(bool)]
     key = ["dataset", "split", "size", "model", "seed"]
     df = df.drop_duplicates(subset=key, keep="last") if len(df) else df
     return df.reset_index(drop=True)

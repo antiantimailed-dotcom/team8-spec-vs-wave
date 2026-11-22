@@ -18,7 +18,8 @@ only channels that are clearly tuned to one frequency range. The same probe on u
 SampleCNNs (random weights) is the control. A learned, mel-like layout shows up as far more
 tuned channels than the control, with about 30% of them below 1 kHz (mel) rather than the
 9% of a linear scale or the ~60% a random test tone would give.
-  Writes results/rq3_filter_peaks.csv, figures/rq3_filter_response.png, figures/rq3_filter_peaks.png
+  Writes results/rq3_filter_peaks_<setting>.csv, figures/rq3_filter_response_<setting>.png,
+         figures/rq3_filter_peaks_<setting>.png (setting = --filter-setting, default: first of --settings)
 """
 from __future__ import annotations
 
@@ -175,7 +176,8 @@ def channel_table(R_layers, freqs, state: str, seed, run_id: str) -> list[dict]:
     return rows
 
 
-def probe_filters(setting: dict, n_layers: int, lines: list):
+def probe_filters(name: str, n_layers: int, lines: list):
+    setting = SETTINGS[name]
     import torch
     from common import N_MELS, SAMPLE_RATE, SLICE
     from model import build_model
@@ -199,13 +201,13 @@ def probe_filters(setting: dict, n_layers: int, lines: list):
             rows += channel_table(R, freqs, state, r["seed"], r["run_id"])
             examples.setdefault(state, (r["seed"], R))
     df = pd.DataFrame(rows)
-    df.to_csv(RESULTS / "rq3_filter_peaks.csv", index=False, float_format="%.1f")
+    df.to_csv(RESULTS / f"rq3_filter_peaks_{name}.csv", index=False, float_format="%.1f")
 
     mel_centers = mel_to_hz(np.linspace(hz_to_mel(0), hz_to_mel(SAMPLE_RATE / 2), N_MELS + 2)[1:-1])
     ref_mel = np.mean(mel_centers < 1000)
     ref_lin = 1000 / (SAMPLE_RATE / 2)
     ref_grid = np.mean(freqs < 1000)
-    lines += ["## SampleCNN filter frequencies (pure-tone probe)", "",
+    lines += [f"## SampleCNN filter frequencies (pure-tone probe), {setting['title']}", "",
               f"Each channel's preferred frequency = the test tone it responds to most. Only **tuned** channels "
               f"count (best tone ≥ {TUNED_RATIO:g}× the channel's median response). Control: the same probe on "
               f"untrained SampleCNNs with random weights.", "",
@@ -246,8 +248,9 @@ def probe_filters(setting: dict, n_layers: int, lines: list):
                 ax.set_xlabel("tone frequency (Hz)")
             if L == 0:
                 ax.set_ylabel("channel (sorted by preferred frequency)")
-    fig.suptitle("SampleCNN channel responses to pure tones, normalized per channel (top: trained, bottom: random weights)")
-    fig.tight_layout(); fig.savefig(FIGURES / "rq3_filter_response.png", dpi=150); plt.close(fig)
+    fig.suptitle(f"SampleCNN channel responses to pure tones, {setting['title']}\n"
+                 "normalized per channel (top: trained, bottom: random weights)")
+    fig.tight_layout(); fig.savefig(FIGURES / f"rq3_filter_response_{name}.png", dpi=150); plt.close(fig)
 
     deepest = int(df.layer.max())
     fig, ax = plt.subplots(figsize=(7.5, 4.3))
@@ -258,23 +261,24 @@ def probe_filters(setting: dict, n_layers: int, lines: list):
             ax.hist(v, bins=bins, density=True, alpha=0.55, color=col, label=f"{state} SampleCNN, block {deepest} (tuned channels)")
     ax.hist(mel_centers, bins=bins, density=True, histtype="step", lw=2, color="#2F6FB0", label=f"{N_MELS} mel band centers")
     ax.set_xscale("log"); ax.set_xlabel("preferred frequency (Hz)"); ax.set_ylabel("density")
-    ax.set_title("Preferred frequencies: trained vs. random weights vs. mel scale"); ax.legend(fontsize=8)
-    fig.tight_layout(); fig.savefig(FIGURES / "rq3_filter_peaks.png", dpi=150); plt.close(fig)
-    print("  filters: wrote rq3_filter_peaks.csv and two figures")
+    ax.set_title(f"Preferred frequencies, {setting['title']}: trained vs. random weights vs. mel scale", fontsize=10); ax.legend(fontsize=8)
+    fig.tight_layout(); fig.savefig(FIGURES / f"rq3_filter_peaks_{name}.png", dpi=150); plt.close(fig)
+    print(f"  filters: wrote rq3_filter_peaks_{name}.csv and two figures")
 
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--settings", nargs="+", default=["gtzan_filtered", "fma_6400"], choices=list(SETTINGS))
     ap.add_argument("--filters", action="store_true", help="also probe SampleCNN filters (needs torch and best.pt files)")
-    ap.add_argument("--filter-setting", default="fma_6400", choices=list(SETTINGS))
+    ap.add_argument("--filter-setting", default=None, choices=list(SETTINGS),
+                    help="which models to probe (default: the first of --settings)")
     ap.add_argument("--layers", type=int, default=4, help="stem + this many minus one blocks to probe")
     args = ap.parse_args()
     lines = ["# RQ3: per-genre errors and learned filters", ""]
     for name in args.settings:
         per_genre(name, SETTINGS[name], lines)
     if args.filters:
-        probe_filters(SETTINGS[args.filter_setting], args.layers, lines)
+        probe_filters(args.filter_setting or args.settings[0], args.layers, lines)
     out = RESULTS / ("rq3_" + "_".join(args.settings) + ".md")
     RESULTS.mkdir(exist_ok=True)
     out.write_text("\n".join(lines) + "\n")
